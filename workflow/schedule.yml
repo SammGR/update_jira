@@ -1,1 +1,125 @@
+name: Ejecutar script de Jira
+
+on:
+  schedule:
+    - cron: '0 6 1,15,28 * *'  # Ejecuta a las 6:00 UTC los días 1, 15 y 28
+  workflow_dispatch:  # Permite ejecutarlo manualmente desde GitHub Actions
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run script
+        env:
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+        run: |
+          python <<EOF
+          import requests
+          import csv
+          import json
+          from datetime import datetime
+
+          EMAIL = "${{ secrets.JIRA_EMAIL }}"
+          API_TOKEN = "${{ secrets.JIRA_TOKEN }}"
+          AUTH = (EMAIL, API_TOKEN)
+          HEADERS = {"Accept": "application/json"}
+
+          project_key = 'DR'
+          url = "https://renalic.atlassian.net/rest/api/2/search"
+          fields = "summary,description,issuetype,attachment,timetracking,comment"
+          start_at = 0
+          max_results = 100
+          all_issues = []
+
+          while True:
+              params = {
+                  "jql": f"project = {project_key}",
+                  "startAt": start_at,
+                  "maxResults": max_results,
+                  "fields": fields
+              }
+
+              response = requests.get(url, auth=AUTH, headers=HEADERS, params=params)
+              if response.status_code != 200:
+                  print("Error:", response.status_code)
+                  print(response.text)
+                  exit(1)
+
+              data = response.json()
+              issues = data.get('issues', [])
+              if not issues:
+                  break
+
+              all_issues.extend(issues)
+              if start_at + max_results >= data.get("total", 0):
+                  break
+              start_at += max_results
+
+          json_export = []
+          with open("jira_tasks.csv", "w", newline="", encoding="utf-8") as f:
+              writer = csv.writer(f, delimiter=';')
+              writer.writerow([
+                  "Issue Key", "Tipo", "Summary", "Description", "Attachments",
+                  "Time Estimate", "Time Spent", "Time Remaining", "Comments"
+              ])
+
+              for issue in all_issues:
+                  key = issue['key']
+                  tipo = issue['fields']['issuetype']['name']
+                  summary = issue['fields'].get('summary', '').replace('\n', ' ').strip()
+                  description = issue['fields'].get('description', 'Sin descripción')
+                  if isinstance(description, dict):
+                      description = description.get('content', '')
+                      if isinstance(description, list):
+                          description = ' '.join([str(x) for x in description])
+                  description = str(description).replace('\n', ' ').strip()
+                  attachments = issue['fields'].get('attachment', [])
+                  attachment_links = ", ".join([a['content'] for a in attachments])
+                  tracking = issue['fields'].get('timetracking', {})
+                  time_estimate = tracking.get('originalEstimate', 'N/A')
+                  time_spent = tracking.get('timeSpent', 'N/A')
+                  time_remaining = tracking.get('remainingEstimate', 'N/A')
+                  comments = issue['fields'].get('comment', {}).get('comments', [])
+                  comment_texts = " | ".join([
+                      f"{c['author']['displayName']}: {c['body'].replace(chr(10), ' ').strip()}"
+                      for c in comments
+                  ])
+                  writer.writerow([
+                      key, tipo, summary, description, attachment_links,
+                      time_estimate, time_spent, time_remaining, comment_texts
+                  ])
+                  json_export.append({
+                      "key": key,
+                      "type": tipo,
+                      "summary": summary,
+                      "description": description,
+                      "attachments": [a['content'] for a in attachments],
+                      "time_estimate": time_estimate,
+                      "time_spent": time_spent,
+                      "time_remaining": time_remaining,
+                      "comments": [
+                          {
+                              "author": c['author']['displayName'],
+                              "body": c['body']
+                          } for c in comments
+                      ]
+                  })
+
+          with open("jira_tasks.json", "w", encoding="utf-8") as jf:
+              json.dump(json_export, jf, ensure_ascii=False, indent=4)
+          print(f"\n✅ Exportadas {len(all_issues)} tareas")
+          EOF
 
